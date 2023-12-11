@@ -8,7 +8,10 @@ const String HEXLIMITER = ":H3X:";
 const String GET = "GET";
 const String PUT = "PUT";
 const String LOG = "LOG";
-const String DEFAULT_MACRO = "t0pSecretePa55w0rd!";
+const String READY = "RDY";
+const String ERROR = "ERR";
+const String OKK = "OKK";
+const String DEFAULT_MACRO = "t0pSecretePa55w0rd";
 
 String lineBuffer = "";
 
@@ -56,56 +59,99 @@ void readBuffer() {
   }
 }
 
-// Parses a line of SerialData
-void parseLine(String line) {
-  Serial.println("Parsing line: " + line);
+void handleCommand(String cmd, String arg) {
+  // cmd will be the String between the first two HEXLIMITERS
+  // arg will be the remainder of that String, so from immediately after the second HEXLIMITER through the end
 
-  int hexDex = lineBuffer.indexOf(HEXLIMITER);
-  if (hexDex == -1) {
-    Serial.println("Failed to extract command from line: " + line);
+  // ==== GET ====
+  //  Expects 1 argument fileName
+  if (cmd == GET) 
+  {
+    int firstDex = arg.indexOf(HEXLIMITER);
+    if (firstDex == -1) { 
+      Serial.println(HEXLIMITER+ERROR+HEXLIMITER+"-Description: Failed to parse arg for GET command"); 
+      return; 
+    }
+    String firstArg = arg.substring(0, firstDex);
+    String contents = readFromFile(firstArg);
+    contents.trim(); //trim affects ending whitespace, we currently couldn't include an "enter" keystroke on the end
+    if (contents == ERROR) {
+      Serial.println(HEXLIMITER+ERROR+HEXLIMITER+"-Description: Failed to read from file: " + firstArg);
+      return;
+    }
+    Serial.println(HEXLIMITER+contents+HEXLIMITER);
+    return;
+  } 
+
+  // ==== PUT ====
+  //  Expects 2 arguments fileName and fileContents
+  else if (cmd == PUT)  
+  {
+    int firstDex = arg.indexOf(HEXLIMITER);
+    if (firstDex == -1) { 
+      Serial.println(HEXLIMITER+ERROR+HEXLIMITER + "-Description: Failed to parse arg for PUT command"); 
+      return; 
+    }
+    int secondDex = arg.indexOf(HEXLIMITER, arg.indexOf(HEXLIMITER) + HEXLIMITER.length());
+    if (secondDex == -1) { 
+      Serial.println(HEXLIMITER+ERROR+HEXLIMITER + "-Description: Failed to parse arg for PUT command"); 
+      return; 
+    }
+    String fileName = arg.substring(0, firstDex);
+    String contents = arg.substring(firstDex + HEXLIMITER.length(), secondDex);
+    Serial.println("Saving '" + contents + "' to: " + fileName);
+    Serial.println(HEXLIMITER+writeToFile(fileName, contents)+HEXLIMITER);
+    return;
+  }
+  
+  // ==== LOG ====
+  else if (cmd == LOG) 
+  {
+    Serial.println("===== CARD CONTENTS =====");
+    logCardContents();
+    Serial.println(HEXLIMITER+OKK+HEXLIMITER);
     return;
   }
 
-  String command = lineBuffer.substring(0, hexDex);
-  String arg = lineBuffer.substring(hexDex + HEXLIMITER.length());
-  Serial.println("Command is: " + command + ", arg is: " + arg);
-  
-  // SWITCH
-  if (command == GET) {
-    Serial.println(HEXLIMITER+readFromFile(arg)+HEXLIMITER);
-  } 
-  else if (command == PUT)  {
-    int hexDex2 = lineBuffer.indexOf(HEXLIMITER, hexDex+HEXLIMITER.length());
-    if (hexDex2 == -1) {
-      Serial.println(HEXLIMITER+"ERROR"+HEXLIMITER+": Command is " + PUT + ", but I failed to find a second HEXLIMITER to parse fileName and contents");
-      return;
-    }
+  // ==== READY ====
+  else if (cmd == READY) 
+  {
+    Serial.println(HEXLIMITER+READY+HEXLIMITER);
+    return;
+  }
 
-    String fileName = lineBuffer.substring(hexDex+HEXLIMITER.length(), hexDex2);
-    String contents = lineBuffer.substring(hexDex2+HEXLIMITER.length(), lineBuffer.length()-1);
-    Serial.println("Writing '" + contents + "' to: " + fileName);
-    
-    Serial.println(HEXLIMITER+writeToFile(fileName, contents)+HEXLIMITER);
+  else 
+  {
+    Serial.println(HEXLIMITER+ERROR+HEXLIMITER+": I don't know what to do with the command: " + cmd);
+    return;
   }
-  else if (command == LOG) {
-    Serial.println("===== CARD CONTENTS =====");
-    logCardContents();
-    Serial.println(HEXLIMITER+"DONE"+HEXLIMITER);
+}
+
+// Parses a line of SerialData
+void parseLine(String line) {
+  //Serial.println("Parsing line: " + line);
+  int hexDex = lineBuffer.indexOf(HEXLIMITER);
+  int closeDex = lineBuffer.indexOf(HEXLIMITER, hexDex+HEXLIMITER.length());
+  if (hexDex == -1 || closeDex == -1) {
+    Serial.println(HEXLIMITER+ERROR+HEXLIMITER+"-Description: Failed to extract command from line");
+    return;
   }
-  else {
-    Serial.println(HEXLIMITER+"ERROR"+HEXLIMITER+": I don't know what to do with the command: " + command);
-  }
+
+  String command = lineBuffer.substring(HEXLIMITER.length(), closeDex);
+  String arg = lineBuffer.substring(closeDex + HEXLIMITER.length());
+  
+  handleCommand(command, arg);
 }
 
 // Writes a String to a file found by filename. Creates it if one does not exist
 String writeToFile(String fileName, String contents) {
   File file = SD.open(fileName, O_READ | O_WRITE | O_CREAT); //FILE_WRITE includes O_APPEND which I don't want
   if (!file) {
-    return "ERROR";
+    return ERROR;
   }
   file.println(contents);
   file.close();
-  return "DONE";
+  return OKK;
 }
 
 // Gets a single line from a file that is found by fileName
@@ -120,14 +166,11 @@ String readFromFile(String fileName) {
     if (!SD.exists(fileName)) {
       Serial.println("Requested file does not exist, initializing now!");
       file = SD.open(fileName, FILE_WRITE);
-      Serial.println("Does the file exist? " + String(bool(file)));
       file.println(DEFAULT_MACRO);
       file.close();
-      Serial.println("Now do I think it exists? " + String(SD.exists(fileName)));
       return DEFAULT_MACRO;
     }
-    Serial.println("Failed to read from " + fileName);
-    return "ERROR";
+    return ERROR;
   }
 }
 
@@ -137,10 +180,9 @@ void ensureSD()
   if (sdFound)
     return;
 
-  SD.end();
-  sdFound = SD.begin();
+  sdFound = SD.begin(10);
   if (!sdFound) {
-    Serial.println("Failed to find SD card, will try again in a second");
+    Serial.println("Board: I do not see an SD card or module, since this was going to be encased you should probably call Garrison at this point...");
   }
 }
 
@@ -149,7 +191,7 @@ void logCardContents() {
   if (!sdFound) {
     return;
   }
-  Serial.println("Logging Card Contents:\n");
+  Serial.println("=== Logging Card Contents: ===");
   File root = SD.open("/");
   printDirectory(root, 0);
   root.close();
@@ -158,7 +200,6 @@ void logCardContents() {
 // Simple helper that will recursively print the contents starting at a directory
 void printDirectory(File dir, int numTabs) {
   while (true) {
-
     File entry =  dir.openNextFile();
     if (! entry) {
       // no more files
