@@ -1,9 +1,25 @@
 #include <SPI.h>
 #include <SD.h>
+#include <Keyboard.h>
 
 const int SECOND = 1000;
 
-// Custom sloppy ass Serial communication protocol H3XPI?
+// For MacroPad functioning
+// TODO: Right now WindowsApp tells us fileName. We should take that over officially
+const String TAP_MACRO_FILENAME = "TAP.TXT";
+const String PRESS_MACRO_FILENAME = "PRESS.TXT";
+String _tapMacro = "";
+String _pressMacro = "";
+// How long the btn is depressed before it becomes a press?
+// TODO: Save/Load settings?
+const unsigned int PRESS_THRESHOLD = 333;
+
+// For physical button detection
+const int btnPin = 7;
+int btnState = 0;
+unsigned long btnPressTime;
+
+// API for our Windows Forms App (lol)
 const String HEXLIMITER = ":H3X:";
 const String INTERNAL_LIM = "/-/";
 const String VERBOSE_LIM = "<esobreV>";
@@ -21,6 +37,7 @@ bool sdFound = false;
 unsigned long lastSecondStamp = 0;
 
 void setup() {
+  // For Serial communication, in case user wants to update Macros
   Serial.begin(9600);
   ensureSD();
   // TODO: Idk if this is actually wanted long-term!
@@ -28,19 +45,41 @@ void setup() {
     ; // Wait for something to connect before we wake up
   }
   ensureSD();
+
+  // For functioning as a Macro Pad
+  Keyboard.begin();
+
+  // For detecting button presses
+  pinMode(btnPin, INPUT);
 }
 
 void loop() {
-  if (millis() - lastSecondStamp > SECOND) {
-    lastSecondStamp = millis();
+  unsigned long curTime = millis();
+
+  if ((digitalRead(btnPin) != btnState)) {
+    // btnState changed!
+    if (btnState == 0) {
+      // btn released, type out Macro!
+      if (curTime - btnPressTime > PRESS_THRESHOLD) {
+        sendMacroToKeyboard(1);
+      } else {
+        sendMacroToKeyboard(0);
+      }
+    } else {
+      // btn pressed, cache the time
+      btnPressTime = curTime;
+    }
+  }
+
+  if (curTime - lastSecondStamp > SECOND) {
+    lastSecondStamp = curTime;
     perSecondLoop();
   }
 
   readBuffer();
-
-  // loop runs at about 30fps
-  delay(33);
 }
+
+// TODO: 30hz loop? timed events?
 
 void perSecondLoop() {
   ensureSD();
@@ -170,6 +209,40 @@ void handleCommand(String cmd, String arg) {
   }
 }
 
+// TODO: Add settings for print vs println
+void sendMacroToKeyboard(int pressMacro) {
+  if (pressMacro) {
+    if (_pressMacro != "") {
+      Keyboard.print(_pressMacro);
+      return;
+    } 
+    else {
+      readFromFile(PRESS_MACRO_FILENAME);
+      if (_pressMacro != "") {
+        Keyboard.print(_pressMacro);
+        return;
+      }
+      Serial.print(VERBOSE_LIM+"Failed to find pressMacro to type!"+VERBOSE_LIM);
+      return;
+    }
+  } 
+  else {
+    if (_tapMacro != "") {
+      Keyboard.print(_tapMacro);
+      return;
+    }
+    else {
+      readFromFile(TAP_MACRO_FILENAME);
+      if (_tapMacro != "") {
+        Keyboard.print(_tapMacro);
+        return;
+      }
+      Serial.print(VERBOSE_LIM+"Failed to find tapMacro to type!"+VERBOSE_LIM);
+      return;
+    }
+  }
+}
+
 // Writes a String to a file found by filename. Creates it if one does not exist
 String writeToFile(String fileName, String contents) {
   File file = SD.open(fileName, O_READ | O_WRITE | O_CREAT); //FILE_WRITE includes O_APPEND which I don't want
@@ -189,6 +262,11 @@ String readFromFile(String fileName) {
     String response = file.readStringUntil('\n');
     file.close();
     response.trim(); // TODO: Do we need to support \n? We need to set it on the board a setting...
+    if (fileName == TAP_MACRO_FILENAME) {
+      _tapMacro = response;
+    } else if (fileName == PRESS_MACRO_FILENAME) {
+      _pressMacro = response;
+    }
     return response;
   }
   else {
@@ -197,6 +275,11 @@ String readFromFile(String fileName) {
       file = SD.open(fileName, FILE_WRITE);
       file.println(DEFAULT_MACRO);
       file.close();
+      if (fileName == TAP_MACRO_FILENAME) {
+        _tapMacro = DEFAULT_MACRO;
+      } else if (fileName == PRESS_MACRO_FILENAME) {
+        _pressMacro = DEFAULT_MACRO;
+      }
       return DEFAULT_MACRO;
     }
     return ERROR;
@@ -209,6 +292,11 @@ String readFromFile_AssertFileExists(String fileName) {
     String response = file.readStringUntil('\n');
     file.close();
     response.trim(); // TODO: Do we need to support \n? We need to set it on the board a setting...
+    if (fileName == TAP_MACRO_FILENAME) {
+      _tapMacro = response;
+    } else if (fileName == PRESS_MACRO_FILENAME) {
+      _pressMacro = response;
+    }
     return response;
   }
   else {
