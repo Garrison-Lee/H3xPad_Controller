@@ -2,8 +2,11 @@
 #include <SD.h>
 #include <Keyboard.h>
 
+// 1k ms
 const int SECOND = 1000;
+unsigned long lastSecondStamp = 0;
 
+// === MACRO PAD STUFF ===
 // For MacroPad functioning
 // TODO: Right now WindowsApp tells us fileName. We should take that over officially
 const String TAP_MACRO_FILENAME = "TAP.TXT";
@@ -12,14 +15,23 @@ String _tapMacro = "";
 String _pressMacro = "";
 // How long the btn is depressed before it becomes a press?
 // TODO: Save/Load settings?
-const unsigned int PRESS_THRESHOLD = 333;
-
+const uint8_t PRESS_THRESHOLD = 333;
 // For physical button detection
-const int btnPin = 7;
-int btnState = 0;
-unsigned long btnPressTime;
+const uint8_t PIN_BUTTON = 7;
+uint8_t buttonState = 0;
+/*ooh hoo look at this fancy long*/ 
+uint32_t buttonPressStartTime;
 
+// === RGB STUFF ===
+// For that flashy RGB goodness everyone is going to want so I had better just include
+//  the lil module I bought just has a GND pin and one analog pin per R,G,B, ez <3
+const uint8_t PIN_R = 18; // Screen print on board reads A0
+const uint8_t PIN_G = 19; // A1
+const uint8_t PIN_B = 20; // A2
+
+// === API ===
 // API for our Windows Forms App (lol)
+// TODO: You know you want to! Ditch the strings and do it with raw bytes, chicken
 const String HEXLIMITER = ":H3X:";
 const String INTERNAL_LIM = "/-/";
 const String VERBOSE_LIM = "<esobreV>";
@@ -30,44 +42,50 @@ const String READY = "RDY";
 const String ERROR = "ERR";
 const String OKK = "OKK";
 const String DEFAULT_MACRO = "t0pSecretePa55w0rd";
-
+// Deal with input one line at a time
 String lineBuffer = "";
 
+// SAVE / LOAD
 bool sdFound = false;
-unsigned long lastSecondStamp = 0;
 
 void setup() {
-  // For Serial communication, in case user wants to update Macros
+  // For Serial communication, in case user wants to update Macros, 
+  //  and so that we can read from disk
   Serial.begin(9600);
-  ensureSD();
-  // TODO: Idk if this is actually wanted long-term!
-  while (!Serial) {
-    ; // Wait for something to connect before we wake up
-  }
   ensureSD();
 
   // For functioning as a Macro Pad
   Keyboard.begin();
-
   // For detecting button presses
-  pinMode(btnPin, INPUT);
+  pinMode(PIN_BUTTON, INPUT);
+
+  // For that juicy RGB
+  pinMode(PIN_R, OUTPUT);
+  pinMode(PIN_G, OUTPUT);
+  pinMode(PIN_B, OUTPUT);
+  setLED(0,200,200);
 }
 
 void loop() {
-  unsigned long curTime = millis();
+  uint32_t curTime = millis();
 
-  if ((digitalRead(btnPin) != btnState)) {
+  if (digitalRead(PIN_BUTTON) == 1) {
+    setLED(150, 150, 25);
+  } else {
+    setLED(15, 200, 100);
+  }
+  if ((digitalRead(PIN_BUTTON) != buttonState)) {
     // btnState changed!
-    if (btnState == 0) {
+    if (buttonState == 0) {
       // btn released, type out Macro!
-      if (curTime - btnPressTime > PRESS_THRESHOLD) {
+      if (curTime - buttonPressStartTime > PRESS_THRESHOLD) {
         sendMacroToKeyboard(1);
       } else {
         sendMacroToKeyboard(0);
       }
     } else {
       // btn pressed, cache the time
-      btnPressTime = curTime;
+      buttonPressStartTime = curTime;
     }
   }
 
@@ -85,6 +103,16 @@ void perSecondLoop() {
   ensureSD();
 }
 
+// Yup, those inputs are as easy as you think. 0,0,0 is black/off
+// 255,255,255 is white and brightest. etc.
+// NOTE: Args are signed ints because 255 is max value our light takes
+//  and these are 1-byte ints which have a max value of 255 when signed
+void setLED(int R, int G, int B) {
+  analogWrite(PIN_R, R);
+  analogWrite(PIN_G, G);
+  analogWrite(PIN_B, B);
+}
+
 // Reads the serial buffer and appends it to our String buffer.
 //  We'll clear the buffer as we parse it
 void readBuffer() {
@@ -94,6 +122,12 @@ void readBuffer() {
     lineBuffer += Serial.readString();
 
     int eol = lineBuffer.indexOf("\n");
+    // NOTE: This is not the same strict requirement of opening and closing tags
+    //  that the app uses when parsing from the board.
+    // This is because I'm able to much more accurately gurantee \n are sent intentionally
+    //  from the app side of things
+    // TODO: That should be changed depending on how we want to support \n at the end of macros...
+    //  Current plan is to do that as a separate setting though I think
     if (eol != -1) // we have a line to parse!
     {
       parseLine(lineBuffer.substring(0, eol));
