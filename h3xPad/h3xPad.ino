@@ -8,16 +8,20 @@ unsigned long lastSecondStamp = 0;
 
 // === MACRO PAD STUFF ===
 // For MacroPad functioning
-// TODO: Right now WindowsApp tells us fileName. We should take that over officially
-const String TAP_MACRO_FILENAME = "TAP.TXT";
-const String PRESS_MACRO_FILENAME = "PRESS.TXT";
-String _tapMacro = "";
-String _pressMacro = "";
+const int MAX_MACRO_LENGTH = 64;
+const int TAP_MACRO_ID = 0;
+const int PRESS_MACRO_ID = 1;
+const char *TAP_MACRO_FILENAME = "TAP.TXT";
+const char *PRESS_MACRO_FILENAME = "PRS.TXT";
+const int FILENAME_LENGTH = 8; // 7 + '\0'
+char _tapMacro[MAX_MACRO_LENGTH+1] = ""; //+1 for the terminating char
+char _pressMacro[MAX_MACRO_LENGTH+1] = "";
 // How long the btn is depressed before it becomes a press?
 // TODO: Save/Load settings?
-const uint8_t PRESS_THRESHOLD = 333;
+const uint16_t PRESS_THRESHOLD = 400; // ms
 // For physical button detection
 const uint8_t PIN_BUTTON = 7;
+uint8_t lastButtonState = 0;
 uint8_t buttonState = 0;
 /*ooh hoo look at this fancy long*/ 
 uint32_t buttonPressStartTime;
@@ -29,21 +33,27 @@ const uint8_t PIN_R = 18; // Screen print on board reads A0
 const uint8_t PIN_G = 19; // A1
 const uint8_t PIN_B = 20; // A2
 
-// === API ===
-// API for our Windows Forms App (lol)
+// === "API" (lol) ===
+// App will send us things wrapped in tags which we can deal with as they come
 // TODO: You know you want to! Ditch the strings and do it with raw bytes, chicken
-const String HEXLIMITER = ":H3X:";
-const String INTERNAL_LIM = "/-/";
-const String VERBOSE_LIM = "<esobreV>";
-const String GET = "GET";
-const String PUT = "PUT";
-const String LOG = "LOG";
-const String READY = "RDY";
-const String ERROR = "ERR";
-const String OKK = "OKK";
-const String DEFAULT_MACRO = "t0pSecretePa55w0rd";
-// Deal with input one line at a time
-String lineBuffer = "";
+
+const char *OPEN_MAIN = "<H3X>";
+const char *CLOSE_MAIN = "</H3X>";
+const char *OPEN_VERBOSE = "<VBE>";
+const char *CLOSE_VERBOSE = "</VBE>";
+const char *INTERNAL_DELIMITER = "<->";
+// This length would allow for a max-length macro, an open/close tag-pair, 3 internal delimiters, 3 keywords, and a terminating char
+const int BUFFER_LENGTH = MAX_MACRO_LENGTH + 30;
+char _buffer[BUFFER_LENGTH] = "";
+
+// Keywords
+const char *GET = "GET";
+const char *PUT = "PUT";
+const char *LOG = "LOG";
+const char *READY = "RDY";
+const char *ERROR = "ERR";
+const char *OKK = "OKK";
+const char *DEFAULT_MACRO = "password";
 
 // SAVE / LOAD
 bool sdFound = false;
@@ -63,28 +73,42 @@ void setup() {
   pinMode(PIN_R, OUTPUT);
   pinMode(PIN_G, OUTPUT);
   pinMode(PIN_B, OUTPUT);
-  setLED(0,200,200);
+  setLED(0,5,5);
+
+  _buffer[BUFFER_LENGTH-1] = '\0';
+}
+
+// Just a convenience method that wraps our message in the appropriate tag(s)
+void sendResponse(const char *msg) { 
+  Serial.print(OPEN_MAIN);
+  Serial.print(msg);
+  Serial.print(CLOSE_MAIN);
+}
+void sendVerbose(const char *msg) {
+  Serial.print(OPEN_VERBOSE);
+  Serial.print(msg);
+  Serial.print(CLOSE_VERBOSE);
+}
+void sendVerbose(const __FlashStringHelper *msg) {
+  Serial.print(OPEN_VERBOSE);
+  Serial.print(msg);
+  Serial.print(CLOSE_VERBOSE);
 }
 
 void loop() {
   uint32_t curTime = millis();
 
-  if (digitalRead(PIN_BUTTON) == 1) {
-    setLED(150, 150, 25);
-  } else {
-    setLED(15, 200, 100);
-  }
-  if ((digitalRead(PIN_BUTTON) != buttonState)) {
-    // btnState changed!
+  // Button press detection!
+  buttonState = digitalRead(PIN_BUTTON);
+  if ((buttonState != lastButtonState)) {
+    lastButtonState = buttonState;
     if (buttonState == 0) {
       // btn released, type out Macro!
-      if (curTime - buttonPressStartTime > PRESS_THRESHOLD) {
-        sendMacroToKeyboard(1);
-      } else {
-        sendMacroToKeyboard(0);
-      }
+      sendVerbose(F("button RELEASED"));
+      sendMacroToKeyboard(curTime - buttonPressStartTime > PRESS_THRESHOLD ? PRESS_MACRO_ID : TAP_MACRO_ID);
     } else {
       // btn pressed, cache the time
+      sendVerbose(F("button PRESSED"));
       buttonPressStartTime = curTime;
     }
   }
@@ -98,7 +122,6 @@ void loop() {
 }
 
 // TODO: 30hz loop? timed events?
-
 void perSecondLoop() {
   ensureSD();
 }
@@ -108,234 +131,265 @@ void perSecondLoop() {
 // NOTE: Args are signed ints because 255 is max value our light takes
 //  and these are 1-byte ints which have a max value of 255 when signed
 void setLED(int R, int G, int B) {
-  analogWrite(PIN_R, R);
-  analogWrite(PIN_G, G);
-  analogWrite(PIN_B, B);
+  // TODO: Minimum value that actually lights up seems to be 128 (255/2?)
+  // As-is, a value of 0 will get mapped to 127 which is actually off. Everything
+  //  else begins at 128 which seems to be the lowest "ON" value
+  analogWrite(PIN_R, map(R, 0, 255, 127, 255));
+  analogWrite(PIN_G, map(G, 0, 255, 127, 255));
+  analogWrite(PIN_B, map(B, 0, 255, 127, 255));
 }
 
 // Reads the serial buffer and appends it to our String buffer.
 //  We'll clear the buffer as we parse it
 void readBuffer() {
-  int bytesAvailable = Serial.available();
+  static uint8_t pos = 0;
+  uint8_t bytesAvailable = Serial.available();
   if (bytesAvailable > 0)
   {
-    lineBuffer += Serial.readString();
-
-    int eol = lineBuffer.indexOf("\n");
-    // NOTE: This is not the same strict requirement of opening and closing tags
-    //  that the app uses when parsing from the board.
-    // This is because I'm able to much more accurately gurantee \n are sent intentionally
-    //  from the app side of things
-    // TODO: That should be changed depending on how we want to support \n at the end of macros...
-    //  Current plan is to do that as a separate setting though I think
-    if (eol != -1) // we have a line to parse!
-    {
-      parseLine(lineBuffer.substring(0, eol));
-      lineBuffer = lineBuffer.substring(eol+1);
+    _buffer[pos] = Serial.read();
+    pos++;
+    if (pos >= BUFFER_LENGTH-1) {
+      sendVerbose(F("Buffer overflow! Resetting"));
+      pos = 0;
     }
+    //Serial.print(_buffer);
+
+    char *cmdStart = strstr(_buffer, OPEN_MAIN);
+    if (cmdStart) {
+      // TODO: Worth it to make that length a const?
+      cmdStart += strlen(OPEN_MAIN); // We actually want to drop the open tag when parsing
+      char *cmdEnd = strstr(_buffer, CLOSE_MAIN);
+      if (cmdEnd) {
+        int cmdLength = cmdEnd - cmdStart;
+        char cmd[cmdLength+1];
+        strncpy(cmd, cmdStart, cmdLength);
+        cmd[cmdLength] = '\0';
+        parseCommand(cmd);
+        // Reset our entire buffer to 0's/null-chars because otherwise we'll immediately "see" the previous command
+        // NOTE: If this ever changes s.t. this loop runs slower than individual characters are received, then
+        //  this part will need to change to move the trailing characters up instead of resetting the buffer completely
+        memset(_buffer, 0, sizeof(_buffer));
+        pos = 0;
+      } // else we are mid-tag, waiting for a close tag to appear!
+    } // else do nothing, openTag not found, we are still waiting!
   }
 }
 
 // Parses a line of SerialData
-void parseLine(String line) {
-  //Serial.print(VERBOSE_LIM + "Parsing line: " + line + VERBOSE_LIM);
-  int hexDex = line.indexOf(HEXLIMITER);
-  int closeDex = line.indexOf(HEXLIMITER, hexDex+HEXLIMITER.length());
-  String excess = line.substring(closeDex + HEXLIMITER.length());
-  if (excess.length() > 0) {
-    Serial.print(VERBOSE_LIM + "NonTerminating WARNING: Dropping '" +excess+ "' from parsed line" + VERBOSE_LIM);
-  }
-  line = line.substring(hexDex+HEXLIMITER.length(), closeDex);
+void parseCommand(char *fullCommand) {
+  sendVerbose(F("Parsing command: "));
+  sendVerbose(fullCommand);
 
-  if (hexDex == -1 || closeDex == -1) {
-    Serial.print(HEXLIMITER+ERROR+HEXLIMITER);
-    Serial.print(VERBOSE_LIM+"- ERROR Description: Failed to extract command from line..."+VERBOSE_LIM);
-    return;
+  char *cmd = fullCommand;
+  char *arg = strstr(cmd, INTERNAL_DELIMITER);
+  int cmdLength = strlen(cmd);
+  if (arg) {
+    cmdLength = arg - cmd;
+    arg += strlen(INTERNAL_DELIMITER);
   }
 
-  int argDex = line.indexOf(INTERNAL_LIM);
-  String command;
-  String arg;
-  if (argDex == -1) {
-    command = line;
-    arg = "";
-  } else {
-    command = line.substring(0, argDex);
-    arg = line.substring(argDex+INTERNAL_LIM.length());
-  }
-
-  handleCommand(command, arg);
+  handleCommand(cmd, cmdLength, arg);
 }
 
-void handleCommand(String cmd, String arg) {
+void handleCommand(const char *command, int cmdLength, const char *arg) {
   // cmd will be the string up until the first internal delimeter
   // arg will be everything afterwards, and could contain more delimters to parse
+  char cmd[cmdLength+1];
+  cmd[cmdLength] = '\0';
+  strncpy(cmd, command, cmdLength);
 
-  // *should* be redundant
-  cmd.trim();
-  arg.trim();
-
+  sendVerbose(F("Handling command: "));
+  sendVerbose(cmd);
+  sendVerbose(F("Command's args: "));
+  sendVerbose(arg);
   // ==== GET ====
-  //  Expects 1 argument fileName
-  if (cmd == GET) 
+  //  Expects 1 argument: fileName
+  if (strcmp(cmd, GET) == 0) 
   {
-    if (arg.length() < 1) { 
-      Serial.print(HEXLIMITER+ERROR+HEXLIMITER);
-      Serial.print(VERBOSE_LIM+"- ERROR Description: Failed to parse arg for GET command..."+VERBOSE_LIM); 
+    if (!arg) { 
+      sendVerbose(F("ERROR - GET requires one arg"));
+      sendResponse(ERROR);
       return; 
     }
-    String contents = readFromFile(arg);
-    contents.trim(); //trim affects ending whitespace, we currently couldn't include an "enter" keystroke on the end
-    if (contents == ERROR) {
-      Serial.print(HEXLIMITER+ERROR+HEXLIMITER);
-      Serial.print(VERBOSE_LIM+"- ERROR Description: Failed to read '" + arg + "' from SD card!"+VERBOSE_LIM);
+    // TODO: Need slightly more if we ever get multiple options
+    char *contents = readFromFile(atoi(arg) == TAP_MACRO_ID ? TAP_MACRO_FILENAME : PRESS_MACRO_FILENAME);
+    if (strcmp(contents, ERROR) == 0) {
+      sendVerbose(F("ERROR - Failed to read from SD card!"));
+      sendResponse(ERROR);
       return;
     }
-    Serial.print(HEXLIMITER+contents+HEXLIMITER);
+    sendResponse(contents);
     return;
   } 
 
   // ==== PUT ====
   //  Expects 2 arguments fileName and fileContents
-  else if (cmd == PUT)  
+  else if (strcmp(cmd, PUT) == 0)  
   {
-    if (arg.length() < 1) { 
-      Serial.print(HEXLIMITER+ERROR+HEXLIMITER);
-      Serial.print(VERBOSE_LIM+"- ERROR Description: Failed to parse arg for PUT command"+VERBOSE_LIM); 
+    // Note, char right at arg will be 0 or 1 to indicate PressOrTapMacroID
+    // so like 0<->password\0 might be an example of what arg points to
+    if (!arg) { 
+      sendVerbose(F("ERROR - PUT requires args"));
+      sendResponse(ERROR);
       return; 
     }
-    int limDex = arg.indexOf(INTERNAL_LIM);
-    if (limDex == -1) { 
-      Serial.print(HEXLIMITER+ERROR+HEXLIMITER);
-      Serial.print(VERBOSE_LIM+"- ERROR Description: Failed to parse second arg for PUT command"+VERBOSE_LIM); 
+    char *writeContents = strstr(arg, INTERNAL_DELIMITER);
+    if (!writeContents) { 
+      sendVerbose(F("ERROR - PUT requires 2 args"));
+      sendResponse(ERROR);
       return; 
     }
-    String fileName = arg.substring(0, limDex);
-    String contents = arg.substring(limDex + INTERNAL_LIM.length());
-    fileName.trim();
-    contents.trim();
-    Serial.print(VERBOSE_LIM+"Saving '" + contents + "' to " + fileName+VERBOSE_LIM);
-    Serial.print(HEXLIMITER+writeToFile(fileName, contents)+HEXLIMITER);
+    writeContents += strlen(INTERNAL_DELIMITER);
+    sendResponse(writeToFile(atoi(arg) == TAP_MACRO_ID ? TAP_MACRO_FILENAME : PRESS_MACRO_FILENAME, writeContents));
     return;
   }
   
   // ==== LOG ====
-  else if (cmd == LOG) 
+  else if (strcmp(cmd, LOG) == 0) 
   {
-    Serial.print(VERBOSE_LIM+"===== CARD CONTENTS ====="+VERBOSE_LIM);
     logCardContents();
-    Serial.print(HEXLIMITER+OKK+HEXLIMITER);
+    sendResponse(OKK);
     return;
   }
 
   // ==== READY ====
-  else if (cmd == READY) 
+  else if (strcmp(cmd, READY) == 0) 
   {
-    Serial.print(HEXLIMITER+READY+HEXLIMITER);
+    sendResponse(READY);
     return;
   }
 
   else 
   {
-    Serial.print(HEXLIMITER+ERROR+HEXLIMITER);
-    Serial.print(VERBOSE_LIM+"- ERROR Description: I don't know what to do with the command: " + cmd+VERBOSE_LIM);
+    sendVerbose(F("ERROR - Unrecognized command"));
+    sendResponse(ERROR);
     return;
   }
 }
 
-// TODO: Add settings for print vs println
-void sendMacroToKeyboard(int pressMacro) {
-  if (pressMacro) {
-    if (_pressMacro != "") {
-      Keyboard.print(_pressMacro);
-      return;
-    } 
-    else {
-      readFromFile(PRESS_MACRO_FILENAME);
-      if (_pressMacro != "") {
-        Keyboard.print(_pressMacro);
+void typeOut(const char *macro) {
+  const char *p;
+  p = macro;
+  while (*p) {
+    Keyboard.write(*p);
+    p++;
+    delay(10);
+  }
+}
+
+void sendMacroToKeyboard(int macroId) {
+  if (macroId == TAP_MACRO_ID) {
+    if (!_tapMacro[0]) {
+      readFromFile(TAP_MACRO_FILENAME);
+      if (!_tapMacro[0]) {
+        sendVerbose(F("Failed to find tapMacro!"));
         return;
       }
-      Serial.print(VERBOSE_LIM+"Failed to find pressMacro to type!"+VERBOSE_LIM);
-      return;
     }
+    typeOut(_tapMacro);
   } 
   else {
-    if (_tapMacro != "") {
-      Keyboard.print(_tapMacro);
-      return;
-    }
-    else {
-      readFromFile(TAP_MACRO_FILENAME);
-      if (_tapMacro != "") {
-        Keyboard.print(_tapMacro);
+    if (!_pressMacro[0]) {
+      readFromFile(PRESS_MACRO_FILENAME);
+      if (!_pressMacro[0]) {
+        sendVerbose(F("Failed to find pressMacro!"));
         return;
       }
-      Serial.print(VERBOSE_LIM+"Failed to find tapMacro to type!"+VERBOSE_LIM);
-      return;
     }
+    typeOut(_pressMacro);
   }
 }
 
 // Writes a String to a file found by filename. Creates it if one does not exist
-String writeToFile(String fileName, String contents) {
+const char* writeToFile(const char *fileName, const char *contents) {
+  sendVerbose(F("Writing contents to file!"));
+  // First we delete the existing version because there is shitty ass support for overwriting otherwise
+  SD.remove(fileName);
   File file = SD.open(fileName, O_READ | O_WRITE | O_CREAT); //FILE_WRITE includes O_APPEND which I don't want
   if (!file) {
+    sendVerbose(F("Failed to open file"));
     return ERROR;
   }
-  file.println(contents);
+  file.print(contents);
   file.close();
-  Serial.print(VERBOSE_LIM+"Save operation completed, attempting to read back: "+VERBOSE_LIM);
+  sendVerbose(F("Save operation completed, attempting to read back..."));
   return readFromFile_AssertFileExists(fileName);
 }
 
 // Gets a single line from a file that is found by fileName
-String readFromFile(String fileName) {
+char* readFromFile(const char *fileName) {
   File file = SD.open(fileName);
   if (file) {
-    String response = file.readStringUntil('\n');
-    file.close();
-    response.trim(); // TODO: Do we need to support \n? We need to set it on the board a setting...
-    if (fileName == TAP_MACRO_FILENAME) {
-      _tapMacro = response;
-    } else if (fileName == PRESS_MACRO_FILENAME) {
-      _pressMacro = response;
+    char contents[MAX_MACRO_LENGTH + 1] = "";
+    contents[MAX_MACRO_LENGTH] = '\0';
+    int fileSize = file.available();
+    if (fileSize > 0) {
+      file.read(contents, fileSize);
+    } else {
+      strcpy(contents, "BLANK");
     }
-    return response;
+    file.close();
+    if (fileName == TAP_MACRO_FILENAME) {
+      strcpy(_tapMacro, contents);
+      return _tapMacro;
+    } else if (fileName == PRESS_MACRO_FILENAME) {
+      strcpy(_pressMacro, contents);
+      return _pressMacro;
+    }
+    strcpy(_tapMacro, ERROR);
+    sendVerbose(F("ERROR - Unknown fileName to read from"));
+    return _tapMacro;
   }
   else {
     if (!SD.exists(fileName)) {
-      Serial.print(VERBOSE_LIM+"Requested file does not exist, initializing now!"+VERBOSE_LIM);
+      sendVerbose(F("Requested file does not exist, initializing now!"));
       file = SD.open(fileName, FILE_WRITE);
-      file.println(DEFAULT_MACRO);
+      file.print(DEFAULT_MACRO);
       file.close();
       if (fileName == TAP_MACRO_FILENAME) {
-        _tapMacro = DEFAULT_MACRO;
+        strcpy(_tapMacro, DEFAULT_MACRO);
+        return _tapMacro;
       } else if (fileName == PRESS_MACRO_FILENAME) {
-        _pressMacro = DEFAULT_MACRO;
+        strcpy(_pressMacro, DEFAULT_MACRO);
+        return _pressMacro;
       }
-      return DEFAULT_MACRO;
+      sendVerbose(F("ERROR - Unkown fileName was used..."));
+      strcpy(_tapMacro, ERROR);
+      return _tapMacro;
     }
-    return ERROR;
+    sendVerbose(F("ERROR - Failed to read from existing file"));
+    strcpy(_tapMacro, ERROR);
+    return _tapMacro;
   }
 }
 
-String readFromFile_AssertFileExists(String fileName) {
+char* readFromFile_AssertFileExists(const char *fileName) {
   File file = SD.open(fileName);
   if (file) {
-    String response = file.readStringUntil('\n');
-    file.close();
-    response.trim(); // TODO: Do we need to support \n? We need to set it on the board a setting...
-    if (fileName == TAP_MACRO_FILENAME) {
-      _tapMacro = response;
-    } else if (fileName == PRESS_MACRO_FILENAME) {
-      _pressMacro = response;
+    char contents[MAX_MACRO_LENGTH + 1] = "";
+    contents[MAX_MACRO_LENGTH] = '\0';
+    int fileSize = file.available();
+    if (fileSize > 0) {
+      file.read(contents, fileSize);
+    } else {
+      strcpy(contents, "BLANK");
     }
-    return response;
+    file.close();
+    if (fileName == TAP_MACRO_FILENAME) {
+      strcpy(_tapMacro, contents);
+      return _tapMacro;
+    } else if (fileName == PRESS_MACRO_FILENAME) {
+      strcpy(_pressMacro, contents);
+      return _pressMacro;
+    }
+    strcpy(_tapMacro, ERROR);
+    sendVerbose(F("ERROR - Unknown fileName to read from"));
+    return _tapMacro;
   }
-  else {
-    return ERROR;
-  }
+  
+  sendVerbose(F("ERROR - Failed to open a file we asserted must exist"));
+  strcpy(_tapMacro, ERROR);
+  return _tapMacro;
 }
 
 // Attempts to find the SD, we run this in a once-per-second loop
@@ -346,7 +400,9 @@ void ensureSD()
 
   sdFound = SD.begin(10);
   if (!sdFound) {
-    Serial.print(VERBOSE_LIM+"Board: I do not see an SD card or module, since this was going to be encased you should probably call Garrison at this point..."+VERBOSE_LIM);
+    sendVerbose(F("Failed to find an SD card or SD Module!"));
+  } else {
+    logCardContents();
   }
 }
 
@@ -355,19 +411,19 @@ void logCardContents() {
   if (!sdFound) {
     return;
   }
-  Serial.print(VERBOSE_LIM+"=== Logging Card Contents ===\n"+VERBOSE_LIM);
+  sendVerbose(F("=== Logging Card Contents ==="));
   File root = SD.open("/");
-  Serial.print(VERBOSE_LIM);
+  Serial.print(OPEN_VERBOSE);
   printDirectory(root, 0);
   root.close();
-  Serial.print(VERBOSE_LIM);
+  Serial.print(CLOSE_VERBOSE);
 }
 
 // Simple helper that will recursively print the contents starting at a directory
 void printDirectory(File dir, int numTabs) {
   while (true) {
     File entry =  dir.openNextFile();
-    if (! entry) {
+    if (!entry) {
       // no more files
       break;
     }
