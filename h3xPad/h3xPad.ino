@@ -1,10 +1,12 @@
 #include <SPI.h>
 #include <SD.h>
 #include <Keyboard.h>
+#include <avr/wdt.h>
 
 // 1k ms
 const int SECOND = 1000;
-unsigned long lastSecondStamp = 0;
+uint32_t lastSecondStamp = 0;
+const uint32_t THIRTY_MINUTES = 1800000; // 1,800,000 ms = 30min
 
 // === MACRO PAD STUFF ===
 // For MacroPad functioning
@@ -21,10 +23,11 @@ char _pressMacro[MAX_MACRO_LENGTH+1] = "";
 const uint16_t PRESS_THRESHOLD = 400; // ms
 // For physical button detection
 const uint8_t PIN_BUTTON = 7;
-uint8_t lastButtonState = 0;
-uint8_t buttonState = 0;
+int lastButtonState = 0;
+int buttonState = 0;
 /*ooh hoo look at this fancy long*/ 
 uint32_t buttonPressStartTime;
+bool busyTyping = false; // So we can ignore button mashing
 
 // === RGB STUFF ===
 // For that flashy RGB goodness everyone is going to want so I had better just include
@@ -73,7 +76,8 @@ void setup() {
   pinMode(PIN_R, OUTPUT);
   pinMode(PIN_G, OUTPUT);
   pinMode(PIN_B, OUTPUT);
-  setLED(0,5,5);
+  // INTIAL COLOR BEFORE ANY PRESSES
+  setLED(0, 10, 10);
 
   _buffer[BUFFER_LENGTH-1] = '\0';
 }
@@ -103,14 +107,28 @@ void loop() {
   if ((buttonState != lastButtonState)) {
     lastButtonState = buttonState;
     if (buttonState == 0) {
-      // btn released, type out Macro!
-      sendVerbose(F("button RELEASED"));
-      sendMacroToKeyboard(curTime - buttonPressStartTime > PRESS_THRESHOLD ? PRESS_MACRO_ID : TAP_MACRO_ID);
+      // DEFAULT COLOR! TODO: Can we variablize or even make this a setting we read/write?
+      setLED(0, 10, 10);
+      if (curTime - buttonPressStartTime < 25) {
+        sendVerbose(F("button BOUNCED, ignoring!"));
+      } else {
+        // btn released, type out Macro!
+        sendVerbose(F("button RELEASED"));
+        sendMacroToKeyboard(curTime - buttonPressStartTime > PRESS_THRESHOLD ? PRESS_MACRO_ID : TAP_MACRO_ID);
+      }
     } else {
+      // PRESSED COLOR!
+      setLED(0, 5, 0);
       // btn pressed, cache the time
       sendVerbose(F("button PRESSED"));
       buttonPressStartTime = curTime;
     }
+  }
+  
+  // Change LED to indicate long press time has been reached
+  if (buttonState == 1 && curTime - buttonPressStartTime > PRESS_THRESHOLD) {
+    // LONG PRESS INDICATION COLOR!
+    setLED(5, 0, 5);
   }
 
   if (curTime - lastSecondStamp > SECOND) {
@@ -124,6 +142,16 @@ void loop() {
 // TODO: 30hz loop? timed events?
 void perSecondLoop() {
   ensureSD();
+
+  if (millis() > THIRTY_MINUTES) {
+    unsigned long time;
+    time = millis() + 5000;
+    wdt_enable(WDTO_15MS);
+    while (millis() < time) {
+      // We wait 5 seconds with a 15ms watchdog set up
+    }
+    sendVerbose(F("ERROR: Tried and failed to RESET!"));
+  }
 }
 
 // Yup, those inputs are as easy as you think. 0,0,0 is black/off
@@ -268,6 +296,7 @@ void handleCommand(const char *command, int cmdLength, const char *arg) {
 }
 
 void typeOut(const char *macro) {
+  busyTyping = true;
   const char *p;
   p = macro;
   while (*p) {
@@ -275,9 +304,14 @@ void typeOut(const char *macro) {
     p++;
     delay(10);
   }
+  busyTyping = false;
 }
 
 void sendMacroToKeyboard(int macroId) {
+  if (busyTyping) {
+    return;
+  }
+
   if (macroId == TAP_MACRO_ID) {
     if (!_tapMacro[0]) {
       readFromFile(TAP_MACRO_FILENAME);
