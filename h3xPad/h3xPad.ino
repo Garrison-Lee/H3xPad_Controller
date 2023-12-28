@@ -6,7 +6,7 @@
 // 1k ms
 const int SECOND = 1000;
 uint32_t lastSecondStamp = 0;
-const uint32_t THIRTY_MINUTES = 1800000; // 1,800,000 ms = 30min
+const uint32_t TEN_MINUTES = 600000; // 600,000ms = 10min : 1,800,000 ms = 30min
 
 // === MACRO PAD STUFF ===
 // For MacroPad functioning
@@ -45,6 +45,7 @@ const char *CLOSE_MAIN = "</H3X>";
 const char *OPEN_VERBOSE = "<VBE>";
 const char *CLOSE_VERBOSE = "</VBE>";
 const char *INTERNAL_DELIMITER = "<->";
+bool isVerbose = false;
 // This length would allow for a max-length macro, an open/close tag-pair, 3 internal delimiters, 3 keywords, and a terminating char
 const int BUFFER_LENGTH = MAX_MACRO_LENGTH + 30;
 char _buffer[BUFFER_LENGTH] = "";
@@ -89,11 +90,17 @@ void sendResponse(const char *msg) {
   Serial.print(CLOSE_MAIN);
 }
 void sendVerbose(const char *msg) {
+  if (!isVerbose || Serial.availableForWrite()) {
+    return;
+  }
   Serial.print(OPEN_VERBOSE);
   Serial.print(msg);
   Serial.print(CLOSE_VERBOSE);
 }
 void sendVerbose(const __FlashStringHelper *msg) {
+  if (!isVerbose) {
+    return;
+  }
   Serial.print(OPEN_VERBOSE);
   Serial.print(msg);
   Serial.print(CLOSE_VERBOSE);
@@ -110,17 +117,17 @@ void loop() {
       // DEFAULT COLOR! TODO: Can we variablize or even make this a setting we read/write?
       setLED(0, 10, 10);
       if (curTime - buttonPressStartTime < 25) {
-        sendVerbose(F("button BOUNCED, ignoring!"));
+        //sendVerbose(F("button BOUNCED, ignoring!"));
       } else {
         // btn released, type out Macro!
-        sendVerbose(F("button RELEASED"));
+        //sendVerbose(F("button RELEASED"));
         sendMacroToKeyboard(curTime - buttonPressStartTime > PRESS_THRESHOLD ? PRESS_MACRO_ID : TAP_MACRO_ID);
       }
     } else {
       // PRESSED COLOR!
       setLED(0, 5, 0);
       // btn pressed, cache the time
-      sendVerbose(F("button PRESSED"));
+      //sendVerbose(F("button PRESSED"));
       buttonPressStartTime = curTime;
     }
   }
@@ -143,7 +150,7 @@ void loop() {
 void perSecondLoop() {
   ensureSD();
 
-  if (millis() > THIRTY_MINUTES) {
+  if (millis() > TEN_MINUTES) {
     unsigned long time;
     time = millis() + 5000;
     wdt_enable(WDTO_15MS);
@@ -283,6 +290,7 @@ void handleCommand(const char *command, int cmdLength, const char *arg) {
   // ==== READY ====
   else if (strcmp(cmd, READY) == 0) 
   {
+    isVerbose = true;
     sendResponse(READY);
     return;
   }
